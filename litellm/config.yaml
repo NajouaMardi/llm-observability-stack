@@ -1,0 +1,37 @@
+model_list:
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: ollama-llama
+    litellm_params:
+      model: ollama/llama3.2:1b
+      api_base: http://ollama:11434
+
+  - model_name: openrouter-llama
+    litellm_params:
+      model: openrouter/meta-llama/llama-4-maverick
+      api_key: os.environ/OPENROUTER_API_KEY
+
+
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+
+general_settings:
+  database_url: os.environ/LITELLM_DATABASE_URL
+  master_key: os.environ/LITELLM_MASTER_KEY
+  disable_master_key_return: false
+  disable_reset_budget: false
+
+litellm_settings:
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+  langfuse_public_key: os.environ/LANGFUSE_PUBLIC_KEY
+  langfuse_secret_key: os.environ/LANGFUSE_SECRET_KEY
+  langfuse_host: os.environ/LANGFUSE_HOST
+
+
