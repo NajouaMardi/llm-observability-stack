@@ -26,6 +26,20 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   disable_master_key_return: false
   disable_reset_budget: false
+  #fallbacks: [{"openrouter-llama": ["ollama-llama"]}]
+  alerting: ["slack"]
+  alerting_threshold: 30
+  alert_types: [
+    "llm_exceptions",
+    "llm_too_slow",
+    "llm_requests_hanging",
+    "budget_alerts",
+    "spend_reports",
+    "cooldown_deployment",
+    "outage_alerts",
+    "daily_reports"
+  ]
+  include_metadata_in_alerts: true
 
 litellm_settings:
   success_callback: ["langfuse"]

@@ -4,7 +4,7 @@ services:
 
   # ── LITELLM PROXY ────────────────────────────────────
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    image: ghcr.io/berriai/litellm:main-v1.82.4
     ports:
       - "4000:4000"
     volumes:
@@ -45,6 +45,14 @@ services:
       - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET}
       - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
       - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_BATCH_EXPORT_ENABLED=true
+      - LANGFUSE_S3_BATCH_EXPORT_BUCKET=langfuse-exports
+      - LANGFUSE_S3_BATCH_EXPORT_REGION=auto
+      - LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID=minio
+      - LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY=${MINIO_SECRET}
+      - LANGFUSE_S3_BATCH_EXPORT_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT=http://localhost:9090
+      - LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +86,14 @@ services:
       - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET}
       - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
       - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_BATCH_EXPORT_ENABLED=true
+      - LANGFUSE_S3_BATCH_EXPORT_BUCKET=langfuse-exports
+      - LANGFUSE_S3_BATCH_EXPORT_REGION=auto
+      - LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID=minio
+      - LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY=${MINIO_SECRET}
+      - LANGFUSE_S3_BATCH_EXPORT_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT=http://localhost:9090
+      - LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -147,7 +163,7 @@ services:
   minio:
     image: cgr.dev/chainguard/minio
     entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
+    command: -c 'mkdir -p /data/langfuse && mkdir -p /data/langfuse-exports && minio server /data --console-address ":9001"'
     ports:
       - "127.0.0.1:9090:9000"
       - "127.0.0.1:9091:9001"
