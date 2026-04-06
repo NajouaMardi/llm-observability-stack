@@ -1,0 +1,299 @@
+version: "3.8"
+
+services:
+
+  # ── BIFROST GATEWAY ─────────────────────────────────
+  bifrost:
+    image: maximhq/bifrost:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LANGFUSE_AUTH=${LANGFUSE_AUTH}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      # Bifrost Postgres (log store + config store)
+      - BIFROST_DB_HOST=bifrost-db
+      - BIFROST_DB_PORT=5432
+      - BIFROST_DB_USER=bifrost
+      - BIFROST_DB_PASSWORD=bifrost
+      - BIFROST_DB_NAME=bifrost
+      # Bifrost Redis (semantic cache vector store)
+      - BIFROST_REDIS_ADDR=bifrost-redis:6379
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      bifrost-db:
+        condition: service_healthy
+      bifrost-redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_started
+
+  # ── BIFROST POSTGRES ─────────────────────────────────
+  bifrost-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=bifrost
+      - POSTGRES_PASSWORD=bifrost
+      - POSTGRES_DB=bifrost
+    volumes:
+      - bifrost_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bifrost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── BIFROST REDIS (Redis Stack required for semantic cache) ──────
+  bifrost-redis:
+    image: redis/redis-stack:latest
+    volumes:
+      - bifrost_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── LANGFUSE WEB (v3) ────────────────────────────────────────────
+  langfuse-web:
+    image: langfuse/langfuse:3
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      - NEXTAUTH_URL=http://localhost:3001
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      # ClickHouse
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://clickhouse:9000
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      # Redis
+      - REDIS_HOST=langfuse-redis
+      - REDIS_PORT=6379
+      # MinIO — event ingestion bucket
+      - LANGFUSE_S3_EVENT_UPLOAD_ENABLED=true
+      - LANGFUSE_S3_EVENT_UPLOAD_BUCKET=langfuse-events
+      - LANGFUSE_S3_EVENT_UPLOAD_REGION=auto
+      - LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      # MinIO — media (prompt attachments, etc.)
+      - LANGFUSE_S3_MEDIA_UPLOAD_ENABLED=true
+      - LANGFUSE_S3_MEDIA_UPLOAD_BUCKET=langfuse-media
+      - LANGFUSE_S3_MEDIA_UPLOAD_REGION=auto
+      - LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE=true
+      # MinIO — batch data export
+      - LANGFUSE_S3_BATCH_EXPORT_ENABLED=true
+      - LANGFUSE_S3_BATCH_EXPORT_BUCKET=langfuse-exports
+      - LANGFUSE_S3_BATCH_EXPORT_REGION=auto
+      - LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_BATCH_EXPORT_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE=true
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  # ── LANGFUSE WORKER (v3) ─────────────────────────────────────────
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      # ClickHouse
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://clickhouse:9000
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      # Redis
+      - REDIS_HOST=langfuse-redis
+      - REDIS_PORT=6379
+      # MinIO — same buckets as web
+      - LANGFUSE_S3_EVENT_UPLOAD_ENABLED=true
+      - LANGFUSE_S3_EVENT_UPLOAD_BUCKET=langfuse-events
+      - LANGFUSE_S3_EVENT_UPLOAD_REGION=auto
+      - LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_MEDIA_UPLOAD_ENABLED=true
+      - LANGFUSE_S3_MEDIA_UPLOAD_BUCKET=langfuse-media
+      - LANGFUSE_S3_MEDIA_UPLOAD_REGION=auto
+      - LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_BATCH_EXPORT_ENABLED=true
+      - LANGFUSE_S3_BATCH_EXPORT_BUCKET=langfuse-exports
+      - LANGFUSE_S3_BATCH_EXPORT_REGION=auto
+      - LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - LANGFUSE_S3_BATCH_EXPORT_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE=true
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── LANGFUSE POSTGRES ─────────────────────────────────
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+      - POSTGRES_DB=langfuse
+    volumes:
+      - langfuse_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── LANGFUSE REDIS ────────────────────────────────────
+  langfuse-redis:
+    image: redis:7-alpine
+    volumes:
+      - langfuse_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── CLICKHOUSE (Langfuse v3 trace store) ─────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      - CLICKHOUSE_USER=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DB=default
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/langfuse.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # ── MINIO (S3-compatible blob storage for Langfuse) ──
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO console UI
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_SERVER_URL=http://localhost:9000
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── MINIO INIT (create buckets on first boot) ─────────
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY &&
+      mc mb --ignore-existing local/langfuse-events &&
+      mc mb --ignore-existing local/langfuse-media &&
+      mc mb --ignore-existing local/langfuse-exports &&
+      echo 'Buckets ready.'
+      "
+
+  # ── OLLAMA (embedding model for semantic cache) ───────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "/bin/ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  # ── ADMINER (DB UI, optional) ─────────────────────────
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8081:8080"
+    depends_on:
+      - bifrost-db
+      - langfuse-db
+
+  # ── BIFROST MONITOR (Discord alerts) ─────────────────
+  bifrost-monitor:
+    build:
+      context: ./monitor
+      dockerfile: Dockerfile.monitor
+    env_file:
+      - .env
+    environment:
+      - BIFROST_URL=http://bifrost:8080
+    depends_on:
+      bifrost:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  bifrost_postgres:
+  bifrost_redis:
+  langfuse_postgres:
+  langfuse_redis:
+  clickhouse_data:
+  minio_data:
+  ollama_data:
