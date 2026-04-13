@@ -162,10 +162,11 @@ Bifrost exposes an **OpenAI-compatible API** on port 8080. Point your applicatio
 ### Example — curl
 
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+# Use provider/model format
+curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4o",
+    "model": "openai/gpt-4o",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -181,7 +182,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="openai/gpt-4o",  # use provider/model format
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)
@@ -212,7 +213,48 @@ Bifrost automatically falls back to secondary providers if the primary fails. Th
 openai/gpt-4o  →  openrouter/meta-llama/llama-4-maverick  →  ollama/llama3.2:1b
 ```
 
-If OpenAI is down or rate-limited, requests automatically retry with OpenRouter, then fall back to the local Ollama model. Fallback chains are configured in `data/config.json` under `routing.fallback`.
+If OpenAI is down or rate-limited, requests automatically retry with OpenRouter, then fall back to the local Ollama model. Fallback chains are configured in `data/config.json` under `governance.routing_rules`.
+
+### Multiple Fallback Chains
+
+Each routing rule targets a specific condition (CEL expression) and has its own fallback list. You can define as many rules as needed:
+
+```json
+"governance": {
+  "routing_rules": [
+    {
+      "id": "rule-gpt4o",
+      "name": "rule-gpt4o",
+      "enabled": true,
+      "cel_expression": "model == \"gpt-4o\"",
+      "targets": [{ "provider": "openai", "model": "gpt-4o", "weight": 1.0 }],
+      "fallbacks": ["openrouter/meta-llama/llama-4-maverick", "ollama/llama3.2:1b"],
+      "scope": "global",
+      "priority": 0
+    },
+    {
+      "id": "rule-gemini",
+      "name": "rule-gemini",
+      "enabled": true,
+      "cel_expression": "model == \"gemini-2.0-flash\"",
+      "targets": [{ "provider": "gemini", "model": "gemini-2.0-flash", "weight": 1.0 }],
+      "fallbacks": ["openrouter/meta-llama/llama-4-maverick"],
+      "scope": "global",
+      "priority": 1
+    }
+  ]
+}
+```
+
+**Available CEL variables:** `model`, `provider`, `request_type`, `budget_used` (0–100), `tokens_used` (0–100), `virtual_key_name`, `team_name`, `customer_id`, `headers["name"]`
+
+> **Note:** `request` in CEL resolves to the *request rate limit usage percentage* (a float) — not the request object. Use `model`, `provider`, etc. directly at the top level.
+
+After editing `data/config.json`, restart Bifrost. If a routing rule already exists in the DB with the same name, delete it first to avoid a conflict:
+```bash
+docker exec $(docker compose ps -q bifrost-db) psql -U bifrost -c "DELETE FROM routing_targets; DELETE FROM routing_rules;"
+docker compose restart bifrost
+```
 
 ### Semantic Cache
 
@@ -288,9 +330,13 @@ The `bifrost-monitor` sidecar polls Bifrost every 60 seconds and sends Discord a
 | Daily Cost Threshold | > $10.00 spent today |
 | High Fallback Rate | > 20% of requests are falling back |
 | Virtual Key Budget Warning | A virtual key has used ≥ 80% of its budget |
-| Low Cache Hit Rate | Semantic cache hit rate < 30% |
 
 Alerts include cooldown periods to avoid repeated notifications for the same issue.
+
+### Implementation Notes
+
+- **Fallback rate** is computed from individual log entries (last 500 by timestamp), not from pre-aggregated histogram buckets — the histogram API does not expose fallback counts. The 500-entry limit safely covers ~100 req/min sustained over a 5-minute window. At higher volumes, the rate may be under-sampled; consider a dedicated Prometheus/Grafana setup for high-throughput production.
+- **Cache hit rate** alerting is not implemented — Bifrost exposes no API or Prometheus metric for semantic cache hits. Monitor cache behavior via the Bifrost UI dashboard instead.
 
 ### Configuring Alert Thresholds
 
@@ -306,7 +352,6 @@ TOTAL_COST_DAILY_THRESHOLD=10.0 # $10.00 per day (default)
 FALLBACK_RATE_THRESHOLD=0.2     # 20% fallback rate (default)
 MIN_REQUESTS_FOR_ALERT=5        # Min requests before triggering rate alerts
 BUDGET_ALERT_THRESHOLD=0.8      # Alert at 80% of virtual key budget
-CACHE_HIT_RATE_THRESHOLD=0.3    # Alert if cache hit rate drops below 30%
 ```
 
 ---
@@ -344,15 +389,28 @@ The main Bifrost configuration file. Key sections:
 - **`config_store` / `logs_store`** — Postgres connection (reads from env vars)
 - **`vector_store`** — Redis connection for semantic cache
 - **`providers`** — API keys per provider, each as a `keys[]` array with `value`, `models`, and `weight`
-- **`routing.fallback`** — fallback chains in `provider/model` format
+- **`governance.routing_rules`** — CEL-based routing rules with per-rule fallback chains in `provider/model` format
 - **`plugins`** — semantic cache and OTEL tracing configuration
 
 > **Important:** Provider keys use `"value": "env.VAR_NAME"` syntax. Bifrost resolves these from environment variables **at first boot only** and stores them in Postgres. If you change a key in `.env` after first boot, you must do a full reset (`docker compose down -v`) for it to take effect.
 
-Changes to `data/config.json` require a Bifrost restart:
+Changes to `data/config.json` require clearing the relevant DB tables first (Postgres is the source of truth after first boot), then restarting:
+
 ```bash
-docker compose up -d
+# For routing rule changes:
+docker exec $(docker compose ps -q bifrost-db) psql -U bifrost \
+  -c "DELETE FROM routing_targets; DELETE FROM routing_rules;"
+
+# For plugin changes (semantic_cache, otel):
+docker exec $(docker compose ps -q bifrost-db) psql -U bifrost \
+  -c "DELETE FROM config_plugins;"
+
+docker compose restart bifrost
 ```
+
+> **`semantic_cache` plugin note:** The `dimension` field is required and must match the embedding model's output size — `nomic-embed-text` = `768`. If missing, Redis fails to create the vector index and the plugin reports `error` on startup.
+
+> **`otel` plugin note:** `trace_type` must be `"otel"`. The value `"genai_extension"` fails schema validation and traces will not be sent to Langfuse.
 
 ---
 

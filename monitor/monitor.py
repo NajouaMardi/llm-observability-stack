@@ -389,20 +389,35 @@ def check_daily_cost():
 
 
 def check_fallback_rate():
-    data = fetch("/api/logs/histogram")
-    if not data:
+    # Histogram buckets don't include fallback counts — use individual log entries instead.
+    recent = fetch_recent_logs(limit=500)
+    if len(recent) < MIN_REQUESTS_FOR_ALERT:
         return
-    buckets = data.get("buckets", [])
-    total = sum(b.get("count", 0) for b in buckets)
-    fallbacks = sum(b.get("fallback", 0) for b in buckets)
-    if total < MIN_REQUESTS_FOR_ALERT or fallbacks == 0:
+
+    now = datetime.now(timezone.utc).timestamp()
+    window_secs = 5 * 60
+    window_logs = []
+    for log in recent:
+        ts_str = log.get("timestamp", "")
+        if ts_str:
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                if now - ts <= window_secs:
+                    window_logs.append(log)
+            except ValueError:
+                pass
+
+    total = len(window_logs)
+    if total < MIN_REQUESTS_FOR_ALERT:
         return
+
+    fallback_logs = [l for l in window_logs if (l.get("fallback_index") or 0) > 0]
+    fallbacks = len(fallback_logs)
+    if fallbacks == 0:
+        return
+
     rate = fallbacks / total
     if rate >= FALLBACK_RATE_THRESHOLD and not already_alerted("fallback_rate"):
-        #Get recent logs to show which primary providers triggered fallbacks
-        recent = fetch_recent_logs(limit=5)
-        fallback_logs = [l for l in recent if (l.get("fallback_index") or 0) > 0]
-
         fallback_providers = {}
         for log in fallback_logs:
             p = log.get("provider", "unknown")
@@ -422,7 +437,6 @@ def check_fallback_rate():
 
 
 BUDGET_ALERT_THRESHOLD = float(os.getenv("BUDGET_ALERT_THRESHOLD", "0.8"))        #alert at 80% of budget used
-CACHE_HIT_RATE_THRESHOLD = float(os.getenv("CACHE_HIT_RATE_THRESHOLD", "0.3"))    #alert if cache hit rate drops below 30%
 
 
 def check_virtual_key_budgets():
@@ -459,45 +473,6 @@ def check_virtual_key_budgets():
                 )
 
 
-def parse_prometheus_metric(metrics_text: str, metric_name: str) -> float | None:
-    """Extract a single gauge/counter value from Prometheus text format."""
-    for line in metrics_text.splitlines():
-        if line.startswith(metric_name + " ") or line.startswith(metric_name + "{"):
-            parts = line.rsplit(" ", 1)
-            if len(parts) == 2:
-                try:
-                    return float(parts[1])
-                except ValueError:
-                    pass
-    return None
-
-
-def check_cache_hit_rate():
-    """Alert if semantic cache hit rate drops below threshold.
-    Silently skips if cache metrics aren't present yet, activates once semantic caching is enabled."""
-    try:
-        resp = requests.get(f"{BIFROST_URL}/metrics", timeout=5)
-        if not resp.ok:
-            return
-        text = resp.text
-        hits = parse_prometheus_metric(text, "bifrost_cache_hits_total")
-        total = parse_prometheus_metric(text, "bifrost_upstream_requests_total")
-        if hits is None or total is None or total == 0:
-            return  #metrics not present yet, semantic caching not enabled
-        hit_rate = hits / (hits + total)
-        if hit_rate < CACHE_HIT_RATE_THRESHOLD and not already_alerted("cache_hit_rate"):
-            send_discord_alert(
-                title="📉 Low Cache Hit Rate",
-                description=f"Semantic cache hit rate is **{hit_rate:.1%}** — below the {CACHE_HIT_RATE_THRESHOLD:.0%} threshold.",
-                color_key="warning",
-                fields=[
-                    {"name": "Cache Hits", "value": str(int(hits)), "inline": True},
-                    {"name": "Total Requests", "value": str(int(total)), "inline": True},
-                    {"name": "Hit Rate", "value": f"{hit_rate:.1%}", "inline": True},
-                ],
-            )
-    except Exception as e:
-        print(f"[monitor] Failed to check cache hit rate: {e}")
 
 
 def run():
@@ -518,7 +493,6 @@ def run():
             check_daily_cost()
             check_fallback_rate()
             check_virtual_key_budgets()   #activates when virtual keys are configured
-            check_cache_hit_rate()        #activates when semantic caching is enabled
         except Exception as e:
             print(f"[monitor] Unexpected error: {e}")
         time.sleep(POLL_INTERVAL)
