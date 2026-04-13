@@ -437,6 +437,39 @@ If you move to managed ClickHouse or managed S3, remove the `clickhouse/config.x
 
 ---
 
+## Data Retention
+
+| Store | What it holds | Retention | Configurable |
+|---|---|---|---|
+| **bifrost-db** (Postgres) | Request logs | 30 days — Bifrost auto-deletes older entries | `client.log_retention_days` in `data/config.json` |
+| **bifrost-redis** (Redis Stack) | Semantic cache vectors | 30 days TTL per entry | `plugins.semantic_cache.ttl` in `data/config.json` (seconds) |
+| **clickhouse** | Langfuse traces and events | Forever — no TTL set | Add a ClickHouse TTL policy manually (see below) |
+| **langfuse-db** (Postgres) | Langfuse metadata (users, projects, prompts) | Forever | No built-in retention |
+| **minio** | Raw events, media, exports | Forever — no lifecycle rules set | Add MinIO bucket lifecycle rules (see below) |
+
+> **Redis note:** No `maxmemory` cap is set. Under heavy traffic, the vector index grows unboundedly until the 30-day TTL expires entries. For production, set a `maxmemory` limit and `maxmemory-policy: allkeys-lru` in the Redis config.
+
+### Adding ClickHouse trace retention (optional)
+
+To automatically drop Langfuse traces older than 90 days, run this against ClickHouse:
+
+```sql
+ALTER TABLE langfuse.traces MODIFY TTL timestamp + INTERVAL 90 DAY;
+ALTER TABLE langfuse.observations MODIFY TTL start_time + INTERVAL 90 DAY;
+```
+
+### Adding MinIO bucket lifecycle rules (optional)
+
+Via MinIO Console (**http://localhost:9001**) → Buckets → `langfuse-events` → Lifecycle → Add Rule → Expiry after N days.
+
+Or via CLI:
+```bash
+docker exec $(docker compose ps -q minio) mc ilm add --expiry-days 90 local/langfuse-events
+docker exec $(docker compose ps -q minio) mc ilm add --expiry-days 90 local/langfuse-media
+```
+
+---
+
 ## Useful Commands
 
 ```bash

@@ -23,10 +23,11 @@
 9. [Data Export](#9-data-export)
 10. [Database Access](#10-database-access)
 11. [ClickHouse Single-Node Setup](#11-clickhouse-single-node-setup)
-12. [Useful Commands](#12-useful-commands)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Production Enhancement Options](#14-production-enhancement-options)
-15. [Known Limitations](#15-known-limitations)
+12. [Data Retention](#12-data-retention)
+13. [Useful Commands](#13-useful-commands)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Production Enhancement Options](#15-production-enhancement-options)
+16. [Known Limitations](#16-known-limitations)
 
 ---
 
@@ -798,7 +799,77 @@ This is the standard recommended approach for self-hosted single-node Langfuse v
 
 ---
 
-## 12. Useful Commands
+## 12. Data Retention
+
+Understanding what gets deleted automatically, what grows forever, and how to configure limits is critical for production operations.
+
+### Retention summary
+
+| Store | What it holds | Default retention | Managed by |
+|---|---|---|---|
+| **bifrost-db** (Postgres) | Request logs | **30 days** — auto-deleted by Bifrost | `client.log_retention_days` in `data/config.json` |
+| **bifrost-redis** (Redis Stack) | Semantic cache vectors | **30 days TTL** per cache entry | `plugins.semantic_cache.ttl` in `data/config.json` (seconds) |
+| **clickhouse** | Langfuse traces and events | **Forever** — no TTL configured | Must be added manually (see below) |
+| **langfuse-db** (Postgres) | Langfuse metadata (users, projects, prompts, scores) | **Forever** | No built-in retention mechanism |
+| **minio** | Raw events, media attachments, batch exports | **Forever** — no lifecycle rules | Must be added via MinIO Console or CLI (see below) |
+
+### Bifrost request log retention
+
+Controlled by `client.log_retention_days` in `data/config.json`:
+
+```json
+"client": {
+  "enable_logging": true,
+  "log_retention_days": 30
+}
+```
+
+Bifrost runs an internal cleanup job that deletes rows from `request_logs` older than this value. Change the value and clear `config_plugins` from the DB, then restart Bifrost to apply.
+
+### Redis semantic cache TTL
+
+Each cache entry has a TTL set at write time via `plugins.semantic_cache.ttl` (seconds). Current value: `2592000` = 30 days. Entries expire individually — Redis does not flush the index wholesale.
+
+**Important:** No `maxmemory` cap is configured. Under sustained high traffic, the vector index grows unboundedly until entries expire. For production, add to the `bifrost-redis` service in `docker-compose.yml`:
+
+```yaml
+bifrost-redis:
+  image: redis/redis-stack:latest
+  command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+```
+
+This caps Redis at 512MB and evicts least-recently-used entries when the limit is reached.
+
+### ClickHouse trace retention (optional)
+
+No TTL is set — traces accumulate indefinitely. To add a TTL:
+
+```sql
+-- Connect: docker exec -it $(docker compose ps -q clickhouse) clickhouse-client --user clickhouse --password <CLICKHOUSE_PASSWORD>
+ALTER TABLE langfuse.traces MODIFY TTL timestamp + INTERVAL 90 DAY;
+ALTER TABLE langfuse.observations MODIFY TTL start_time + INTERVAL 90 DAY;
+```
+
+ClickHouse enforces TTLs during background merges — rows are removed within hours, not instantly.
+
+### MinIO lifecycle rules (optional)
+
+No lifecycle rules are set — all buckets accumulate objects indefinitely. To add expiry:
+
+**Via MinIO Console (http://localhost:9001):** Buckets → select bucket → Lifecycle → Add Rule → set Expiry Days
+
+**Via CLI:**
+```bash
+docker exec $(docker compose ps -q minio) mc ilm add --expiry-days 90 local/langfuse-events
+docker exec $(docker compose ps -q minio) mc ilm add --expiry-days 30 local/langfuse-exports
+docker exec $(docker compose ps -q minio) mc ilm add --expiry-days 90 local/langfuse-media
+```
+
+`langfuse-events` can safely be expired after a few days — the worker ingests them into ClickHouse within seconds to minutes of arrival.
+
+---
+
+## 13. Useful Commands
 
 ```bash
 # ── Stack lifecycle ────────────────────────────────────────────
@@ -844,7 +915,7 @@ docker compose up minio-init
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### Bifrost won't start / immediately exits
 
@@ -1044,7 +1115,7 @@ docker compose logs bifrost-monitor
 
 ---
 
-## 14. Production Enhancement Options
+## 15. Production Enhancement Options
 
 | Current | Production Alternative | Benefit |
 |---|---|---|
@@ -1060,7 +1131,7 @@ docker compose logs bifrost-monitor
 
 ---
 
-## 15. Known Limitations
+## 16. Known Limitations
 
 **Cache hit rate is not alertable.** Bifrost does not expose semantic cache hit or miss counts via any API or Prometheus metric. The `/metrics` endpoint contains only Go runtime and HTTP server metrics — no `bifrost_cache_hits_total` or equivalent exists. Monitor cache behaviour visually in the Bifrost UI.
 
